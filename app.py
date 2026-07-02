@@ -61,6 +61,10 @@ def formatar_numero(valor, casas=4):
     return float(f"{float(valor):.{casas}f}")
 
 
+def formatar_opcao(moeda):
+    return f"{moeda['symbol'].upper()} - {moeda['name']}"
+
+
 def desenhar_grafico(moeda):
     try:
         velas = buscar_ohlc(moeda["id"])
@@ -121,6 +125,44 @@ def filtrar_moedas(moedas, busca):
         or busca in moeda["name"].lower()
         or busca in moeda["id"].lower()
     ]
+
+
+def montar_carteira(moedas, dolar_hoje):
+    precos = {moeda["id"]: moeda for moeda in moedas}
+    linhas = []
+
+    for item in st.session_state.carteira:
+        moeda = precos.get(item["id"])
+        if not moeda:
+            continue
+
+        preco_atual = float(moeda["current_price"] or 0)
+        quantidade = float(item["quantidade"])
+        preco_medio = float(item["preco_medio"])
+        custo = quantidade * preco_medio
+        valor_atual = quantidade * preco_atual
+        resultado = valor_atual - custo
+        resultado_pct = (resultado / custo * 100) if custo else 0
+
+        linhas.append(
+            {
+                "Ativo": moeda["symbol"].upper(),
+                "Nome": moeda["name"],
+                "Quantidade": quantidade,
+                "Preço Médio (US$)": preco_medio,
+                "Preço Atual (US$)": preco_atual,
+                "Valor Atual (US$)": valor_atual,
+                "Valor Atual (R$)": valor_atual * dolar_hoje,
+                "Resultado (US$)": resultado,
+                "Resultado (%)": resultado_pct,
+            }
+        )
+
+    return pd.DataFrame(linhas)
+
+
+if "carteira" not in st.session_state:
+    st.session_state.carteira = []
 
 
 aba_mercado, aba_carteira = st.tabs(["📊 Cripto (Spot)", "💼 Holdings"])
@@ -205,4 +247,107 @@ with aba_mercado:
             st.error(f"Erro central: {erro}")
 
 with aba_carteira:
-    st.info("Aba de patrimônio em desenvolvimento.")
+    try:
+        moedas = buscar_mercado()
+        dolar_hoje = buscar_dolar_brl()
+        moedas_por_label = {formatar_opcao(moeda): moeda for moeda in moedas}
+
+        with st.form("form_carteira", clear_on_submit=True):
+            col_ativo, col_qtd, col_preco = st.columns([2, 1, 1])
+
+            with col_ativo:
+                ativo_label = st.selectbox("Ativo", list(moedas_por_label.keys()))
+            with col_qtd:
+                quantidade = st.number_input("Quantidade", min_value=0.0, step=0.01, format="%.8f")
+            with col_preco:
+                preco_medio = st.number_input("Preço médio (US$)", min_value=0.0, step=0.01, format="%.8f")
+
+            adicionar = st.form_submit_button("➕ Adicionar / Atualizar", type="primary")
+
+        if adicionar:
+            moeda = moedas_por_label[ativo_label]
+            item_existente = next(
+                (item for item in st.session_state.carteira if item["id"] == moeda["id"]),
+                None,
+            )
+
+            if quantidade <= 0:
+                st.warning("Informe uma quantidade maior que zero.")
+            elif item_existente:
+                item_existente["quantidade"] = quantidade
+                item_existente["preco_medio"] = preco_medio
+                st.success(f"{moeda['symbol'].upper()} atualizado na carteira.")
+            else:
+                st.session_state.carteira.append(
+                    {
+                        "id": moeda["id"],
+                        "quantidade": quantidade,
+                        "preco_medio": preco_medio,
+                    }
+                )
+                st.success(f"{moeda['symbol'].upper()} adicionado à carteira.")
+
+        df_carteira = montar_carteira(moedas, dolar_hoje)
+
+        if df_carteira.empty:
+            st.info("Adicione seus ativos acima para acompanhar patrimônio, resultado e alocação.")
+        else:
+            total_usd = float(df_carteira["Valor Atual (US$)"].sum())
+            total_brl = float(df_carteira["Valor Atual (R$)"].sum())
+            resultado_usd = float(df_carteira["Resultado (US$)"].sum())
+            custo_total = total_usd - resultado_usd
+            resultado_pct = (resultado_usd / custo_total * 100) if custo_total else 0
+
+            metrica_total, metrica_brl, metrica_resultado = st.columns(3)
+            metrica_total.metric("Patrimônio", f"US$ {total_usd:,.2f}")
+            metrica_brl.metric("Patrimônio em R$", f"R$ {total_brl:,.2f}")
+            metrica_resultado.metric("Resultado", f"US$ {resultado_usd:,.2f}", f"{resultado_pct:.2f}%")
+
+            fig_alocacao = go.Figure(
+                data=[
+                    go.Pie(
+                        labels=df_carteira["Ativo"],
+                        values=df_carteira["Valor Atual (US$)"],
+                        hole=0.45,
+                    )
+                ]
+            )
+            fig_alocacao.update_layout(
+                title="Alocação da Carteira",
+                template="plotly_dark",
+                margin=dict(l=0, r=0, t=40, b=0),
+                height=360,
+            )
+            st.plotly_chart(fig_alocacao, use_container_width=True)
+
+            st.dataframe(
+                df_carteira,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Quantidade": st.column_config.NumberColumn(format="%.8f"),
+                    "Preço Médio (US$)": st.column_config.NumberColumn(format="US$ %.4f"),
+                    "Preço Atual (US$)": st.column_config.NumberColumn(format="US$ %.4f"),
+                    "Valor Atual (US$)": st.column_config.NumberColumn(format="US$ %.2f"),
+                    "Valor Atual (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
+                    "Resultado (US$)": st.column_config.NumberColumn(format="US$ %.2f"),
+                    "Resultado (%)": st.column_config.NumberColumn(format="%.2f%%"),
+                },
+            )
+
+            remover = st.multiselect("Remover ativos", df_carteira["Ativo"].tolist())
+            if st.button("🗑️ Remover selecionados") and remover:
+                simbolos_remover = {simbolo.lower() for simbolo in remover}
+                st.session_state.carteira = [
+                    item
+                    for item in st.session_state.carteira
+                    if next(
+                        (moeda["symbol"].lower() for moeda in moedas if moeda["id"] == item["id"]),
+                        "",
+                    )
+                    not in simbolos_remover
+                ]
+                st.rerun()
+
+    except Exception as erro:
+        st.error(f"Não foi possível carregar a carteira agora: {erro}")
