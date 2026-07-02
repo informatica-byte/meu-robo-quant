@@ -97,14 +97,19 @@ def binance_request(method, path, params=None):
 def carregar_estado():
     if not STATE_FILE.exists():
         return {
-            "cash_guard": 0,
+            "paper_cash": env_float("BOT_PAPER_INITIAL_CASH", 10000),
             "positions": {},
             "realized_pnl": 0.0,
             "day": datetime.now().strftime("%Y-%m-%d"),
             "day_start_equity": None,
             "halted": False,
         }
-    return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    state.setdefault("paper_cash", env_float("BOT_PAPER_INITIAL_CASH", 10000))
+    state.setdefault("positions", {})
+    state.setdefault("realized_pnl", 0.0)
+    state.setdefault("halted", False)
+    return state
 
 
 def salvar_estado(state):
@@ -233,6 +238,10 @@ def analisar_symbol(symbol):
 
 
 def ordem_market(symbol, side, quote_order_qty=None, quantity=None):
+    modo = os.getenv("BOT_MODE", "paper").strip().lower()
+    if modo == "paper":
+        return {"status": "PAPER_FILLED", "symbol": symbol, "side": side}, "PAPER"
+
     params = {"symbol": symbol, "side": side, "type": "MARKET"}
     if side == "BUY":
         params["quoteOrderQty"] = f"{float(quote_order_qty):.8f}"
@@ -241,14 +250,20 @@ def ordem_market(symbol, side, quote_order_qty=None, quantity=None):
 
     testar = env_bool("BINANCE_TEST_ORDER", True) or not env_bool("BINANCE_REAL_TRADING_ENABLED", False)
     endpoint = "/api/v3/order/test" if testar else "/api/v3/order"
-    return binance_request("POST", endpoint, params), testar
+    return binance_request("POST", endpoint, params), "TEST" if testar else "REAL"
 
 
 def comprar(state, analise, valor_usdt):
     symbol = analise["symbol"]
     preco = analise["price"]
     qty_estimado = valor_usdt / preco
-    resposta, testar = ordem_market(symbol, "BUY", quote_order_qty=valor_usdt)
+    modo = os.getenv("BOT_MODE", "paper").strip().lower()
+
+    if modo == "paper" and state["paper_cash"] < valor_usdt:
+        log(f"PAPER BUY ignorado {symbol}: saldo insuficiente.")
+        return
+
+    resposta, modo_execucao = ordem_market(symbol, "BUY", quote_order_qty=valor_usdt)
 
     pos = state["positions"].get(symbol, {"qty": 0.0, "avg": 0.0})
     custo_antigo = pos["qty"] * pos["avg"]
@@ -256,11 +271,13 @@ def comprar(state, analise, valor_usdt):
     pos["qty"] = nova_qty
     pos["avg"] = (custo_antigo + valor_usdt) / nova_qty
     state["positions"][symbol] = pos
+    if modo == "paper":
+        state["paper_cash"] -= valor_usdt
 
     registrar_trade(
         {
             "time": agora(),
-            "mode": "TEST" if testar else "REAL",
+            "mode": modo_execucao,
             "symbol": symbol,
             "side": "BUY",
             "qty": qty_estimado,
@@ -270,7 +287,7 @@ def comprar(state, analise, valor_usdt):
             "score": analise["score"],
         }
     )
-    log(f"{'TESTE' if testar else 'REAL'} BUY {symbol} USDT {valor_usdt:.2f} score={analise['score']} resposta={resposta}")
+    log(f"{modo_execucao} BUY {symbol} USDT {valor_usdt:.2f} score={analise['score']} resposta={resposta}")
 
 
 def vender(state, analise, percentual, motivo_extra=""):
@@ -281,9 +298,11 @@ def vender(state, analise, percentual, motivo_extra=""):
 
     preco = analise["price"]
     qty = pos["qty"] * (percentual / 100)
-    resposta, testar = ordem_market(symbol, "SELL", quantity=qty)
+    resposta, modo_execucao = ordem_market(symbol, "SELL", quantity=qty)
     pnl = (preco - pos["avg"]) * qty
     state["realized_pnl"] += pnl
+    if os.getenv("BOT_MODE", "paper").strip().lower() == "paper":
+        state["paper_cash"] += qty * preco
     pos["qty"] -= qty
 
     if pos["qty"] <= 0.00000001:
@@ -294,7 +313,7 @@ def vender(state, analise, percentual, motivo_extra=""):
     registrar_trade(
         {
             "time": agora(),
-            "mode": "TEST" if testar else "REAL",
+            "mode": modo_execucao,
             "symbol": symbol,
             "side": "SELL",
             "qty": qty,
@@ -304,13 +323,13 @@ def vender(state, analise, percentual, motivo_extra=""):
             "score": analise["score"],
         }
     )
-    log(f"{'TESTE' if testar else 'REAL'} SELL {symbol} qty={qty:.8f} pnl={pnl:.2f} resposta={resposta}")
+    log(f"{modo_execucao} SELL {symbol} qty={qty:.8f} pnl={pnl:.2f} resposta={resposta}")
 
 
 def equity_estimado(state, analises):
     precos = {a["symbol"]: a["price"] for a in analises}
     posicoes = sum(pos["qty"] * precos.get(symbol, pos["avg"]) for symbol, pos in state["positions"].items())
-    return state.get("cash_guard", 0) + posicoes + state.get("realized_pnl", 0)
+    return state.get("paper_cash", 0) + posicoes
 
 
 def reset_diario(state, analises):
@@ -323,6 +342,7 @@ def reset_diario(state, analises):
 
 def ciclo():
     state = carregar_estado()
+    modo = os.getenv("BOT_MODE", "paper").strip().lower()
     symbols = [s.strip().upper() for s in os.getenv("BOT_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",") if s.strip()]
     valor_por_trade = env_float("BOT_USDT_PER_TRADE", 25)
     max_posicoes = env_int("BOT_MAX_POSITIONS", 3)
@@ -358,6 +378,12 @@ def ciclo():
         salvar_estado(state)
         return
 
+    valor_posicoes = equity - state.get("paper_cash", 0)
+    log(
+        f"Modo={modo.upper()} equity_estimado={equity:.2f} "
+        f"paper_cash={state.get('paper_cash', 0):.2f} posicoes={valor_posicoes:.2f}"
+    )
+
     for analise in sorted(analises, key=lambda item: item["score"], reverse=True):
         symbol = analise["symbol"]
         pos = state["positions"].get(symbol)
@@ -384,6 +410,7 @@ def ciclo():
             analise["signal"] == "BUY"
             and symbol not in state["positions"]
             and len(state["positions"]) < max_posicoes
+            and (modo != "paper" or state.get("paper_cash", 0) >= valor_por_trade)
         ):
             comprar(state, analise, valor_por_trade)
 
@@ -392,8 +419,9 @@ def ciclo():
 
 def main():
     intervalo = env_int("BOT_INTERVAL_SECONDS", 300)
-    log("Robô 24h iniciado.")
-    log("Padrão seguro: BINANCE_TEST_ORDER=true e BINANCE_REAL_TRADING_ENABLED=false.")
+    modo = os.getenv("BOT_MODE", "paper").strip().lower()
+    log(f"Robô 24h iniciado em modo {modo.upper()}.")
+    log("Modo recomendado para provar estratégia: BOT_MODE=paper.")
 
     while True:
         try:
