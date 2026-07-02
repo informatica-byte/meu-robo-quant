@@ -10,13 +10,35 @@ st.set_page_config(page_title="Meu App Crypto", page_icon="📱", layout="wide")
 
 st.title("📱 Meu App Crypto (Com Gráficos V6)")
 
+HEADERS = {
+    "accept": "application/json",
+    "user-agent": "Meu-App-Crypto/1.0",
+}
 
-def buscar_json(url, timeout=10):
-    resposta = requests.get(url, timeout=timeout)
+
+def buscar_json(url, params=None, timeout=15):
+    resposta = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
     resposta.raise_for_status()
     return resposta.json()
 
 
+@st.cache_data(ttl=300)
+def buscar_mercado():
+    return buscar_json(
+        "https://api.coingecko.com/api/v3/coins/markets",
+        params={
+            "vs_currency": "usd",
+            "order": "volume_desc",
+            "per_page": 250,
+            "page": 1,
+            "sparkline": "false",
+            "price_change_percentage": "24h",
+            "locale": "en",
+        },
+    )
+
+
+@st.cache_data(ttl=1800)
 def buscar_dolar_brl():
     try:
         dados = buscar_json("https://api.exchangerate-api.com/v4/latest/USD", timeout=5)
@@ -25,21 +47,36 @@ def buscar_dolar_brl():
         return 5.50
 
 
-def desenhar_grafico(simbolo):
-    url = f"https://api.binance.com/api/v3/klines?symbol={simbolo}&interval=1h&limit=72"
-    velas = buscar_json(url)
+@st.cache_data(ttl=300)
+def buscar_ohlc(coin_id):
+    return buscar_json(
+        f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc",
+        params={"vs_currency": "usd", "days": 7},
+    )
 
-    if not isinstance(velas, list) or not velas:
-        st.warning(f"Não foi possível carregar o gráfico de {simbolo}.")
+
+def formatar_numero(valor, casas=4):
+    if valor is None:
+        return 0.0
+    return float(f"{float(valor):.{casas}f}")
+
+
+def desenhar_grafico(moeda):
+    try:
+        velas = buscar_ohlc(moeda["id"])
+    except Exception as erro:
+        st.warning(f"Não foi possível carregar o gráfico de {moeda['symbol'].upper()}: {erro}")
         return
 
-    df_velas = pd.DataFrame(
-        velas,
-        columns=["t", "o", "h", "l", "c", "v", "ct", "qav", "nt", "tbv", "tqv", "ig"],
-    )
+    if not isinstance(velas, list) or not velas:
+        st.warning(f"Não foi possível carregar o gráfico de {moeda['symbol'].upper()}.")
+        return
+
+    df_velas = pd.DataFrame(velas, columns=["t", "o", "h", "l", "c"])
     df_velas["t"] = pd.to_datetime(df_velas["t"], unit="ms")
     df_velas[["o", "h", "l", "c"]] = df_velas[["o", "h", "l", "c"]].astype(float)
 
+    simbolo = moeda["symbol"].upper()
     fig = go.Figure(
         data=[
             go.Candlestick(
@@ -54,65 +91,73 @@ def desenhar_grafico(simbolo):
     )
 
     fig.update_layout(
-        title=f'📊 Análise Gráfica: {simbolo.replace("USDT", "")} (Últimos 3 dias)',
+        title=f"📊 Análise Gráfica: {simbolo} (últimos 7 dias)",
         template="plotly_dark",
-        yaxis_title="Preço (USDT)",
+        yaxis_title="Preço (US$)",
         xaxis_title="Tempo",
         margin=dict(l=0, r=0, t=40, b=0),
     )
     st.plotly_chart(fig, use_container_width=True)
 
 
+def calcular_resistencia(moeda):
+    try:
+        velas = buscar_ohlc(moeda["id"])
+        maximas = [float(vela[2]) for vela in velas[:-1]]
+        return max(maximas) if maximas else float(moeda["current_price"])
+    except Exception:
+        return float(moeda["high_24h"] or moeda["current_price"] or 0)
+
+
+def filtrar_moedas(moedas, busca):
+    if not busca:
+        return moedas[:20]
+
+    busca = busca.lower()
+    return [
+        moeda
+        for moeda in moedas
+        if busca in moeda["symbol"].lower()
+        or busca in moeda["name"].lower()
+        or busca in moeda["id"].lower()
+    ]
+
+
 aba_mercado, aba_carteira = st.tabs(["📊 Cripto (Spot)", "💼 Holdings"])
 
 with aba_mercado:
-    busca = st.text_input("🔍 Pesquisar par (Ex: BTC, SOL, NEAR)...", "").upper().strip()
+    busca = st.text_input("🔍 Pesquisar ativo (Ex: BTC, SOL, NEAR)...", "").strip()
 
     if st.button("🔄 Atualizar Mercado", type="primary"):
         progresso = st.progress(0, text="A analisar o mercado...")
 
         try:
             dolar_hoje = buscar_dolar_brl()
-            dados = buscar_json("https://api.binance.com/api/v3/ticker/24hr")
+            moedas = buscar_mercado()
+            moedas_alvo = filtrar_moedas(moedas, busca)
 
-            moedas_usdt = [
-                moeda
-                for moeda in dados
-                if moeda["symbol"].endswith("USDT")
-                and moeda["symbol"] not in ["USDCUSDT", "FDUSDUSDT", "TUSDUSDT", "USDTUSDT"]
-            ]
-
-            if busca:
-                moedas_alvo = [moeda for moeda in moedas_usdt if busca in moeda["symbol"]]
-                if moedas_alvo:
-                    desenhar_grafico(moedas_alvo[0]["symbol"])
-            else:
-                moedas_usdt.sort(key=lambda item: float(item["quoteVolume"]), reverse=True)
-                moedas_alvo = moedas_usdt[:20]
+            if busca and moedas_alvo:
+                desenhar_grafico(moedas_alvo[0])
 
             resultados = []
             limite = min(len(moedas_alvo), 10)
 
             for idx, moeda in enumerate(moedas_alvo[:10]):
-                simbolo = moeda["symbol"]
-                nome = simbolo.replace("USDT", "")
-                preco_dolar = float(moeda["lastPrice"])
+                nome = moeda["symbol"].upper()
+                preco_dolar = float(moeda["current_price"] or 0)
                 preco_reais = preco_dolar * dolar_hoje
-                variacao = float(moeda["priceChangePercent"])
-                volume = float(moeda["quoteVolume"]) / 1_000_000
+                variacao = float(moeda["price_change_percentage_24h"] or 0)
+                volume = float(moeda["total_volume"] or 0) / 1_000_000
 
                 progresso.progress(
-                    int((idx + 1) / limite * 100),
+                    int((idx + 1) / max(limite, 1) * 100),
                     text=f"A ler resistência de {nome}...",
                 )
 
-                url_klines = f"https://api.binance.com/api/v3/klines?symbol={simbolo}&interval=1h&limit=24"
-                velas = buscar_json(url_klines)
-                maximas = [float(vela[2]) for vela in velas[:-1]]
-                resistencia = max(maximas) if maximas else preco_dolar
+                resistencia = calcular_resistencia(moeda)
 
                 status = "-"
-                if preco_dolar >= resistencia:
+                if resistencia and preco_dolar >= resistencia:
                     status = "🔥 ROMPENDO!"
                 elif resistencia and (preco_dolar / resistencia) >= 0.98:
                     status = "👀 Quase Rompendo"
@@ -122,10 +167,10 @@ with aba_mercado:
                 resultados.append(
                     {
                         "Ativo": nome,
-                        "Preço (USDT)": float(f"{preco_dolar:.4f}"),
-                        "Preço (R$)": float(f"{preco_reais:.4f}"),
+                        "Preço (US$)": formatar_numero(preco_dolar),
+                        "Preço (R$)": formatar_numero(preco_reais),
                         "Variação": f"{sinal_var}{variacao:.2f}%",
-                        "Vol ($)": float(f"{volume:.2f}"),
+                        "Vol (US$)": formatar_numero(volume, 2),
                         "Robô Quant": status,
                     }
                 )
@@ -135,19 +180,26 @@ with aba_mercado:
             progresso.empty()
 
             if resultados:
+                st.caption("Dados de mercado e gráfico via CoinGecko. Cotação BRL via ExchangeRate API.")
                 st.dataframe(
                     pd.DataFrame(resultados),
                     use_container_width=True,
                     hide_index=True,
                     column_config={
-                        "Preço (USDT)": st.column_config.NumberColumn(format="$ %.4f"),
+                        "Preço (US$)": st.column_config.NumberColumn(format="US$ %.4f"),
                         "Preço (R$)": st.column_config.NumberColumn(format="R$ %.4f"),
-                        "Vol ($)": st.column_config.NumberColumn(format="$ %.2f M"),
+                        "Vol (US$)": st.column_config.NumberColumn(format="US$ %.2f M"),
                     },
                 )
             else:
                 st.warning("Nenhuma moeda encontrada.")
 
+        except requests.HTTPError as erro:
+            progresso.empty()
+            st.error(
+                "A API de mercado recusou a solicitação agora. "
+                f"Tente novamente em alguns instantes. Detalhe: {erro}"
+            )
         except Exception as erro:
             progresso.empty()
             st.error(f"Erro central: {erro}")
