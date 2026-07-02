@@ -1,5 +1,9 @@
+import hashlib
+import hmac
+import os
 import time
 from datetime import datetime
+from urllib.parse import urlencode
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -21,6 +25,79 @@ def buscar_json(url, params=None, timeout=15):
     resposta = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
     resposta.raise_for_status()
     return resposta.json()
+
+
+def buscar_segredo(nome, padrao=""):
+    try:
+        valor = st.secrets.get(nome, "")
+    except Exception:
+        valor = ""
+    return valor or os.getenv(nome, padrao)
+
+
+def binance_base_url():
+    usar_testnet = str(buscar_segredo("BINANCE_USE_TESTNET", "true")).lower() == "true"
+    base_padrao = "https://testnet.binance.vision" if usar_testnet else "https://api.binance.com"
+    return buscar_segredo("BINANCE_BASE_URL", base_padrao).rstrip("/")
+
+
+def binance_credenciais():
+    return buscar_segredo("BINANCE_API_KEY"), buscar_segredo("BINANCE_API_SECRET")
+
+
+def binance_assinar(params, api_secret):
+    query = urlencode(params, doseq=True)
+    assinatura = hmac.new(api_secret.encode("utf-8"), query.encode("utf-8"), hashlib.sha256).hexdigest()
+    return {**params, "signature": assinatura}
+
+
+def binance_request(method, path, params=None):
+    api_key, api_secret = binance_credenciais()
+    if not api_key or not api_secret:
+        raise RuntimeError("Configure BINANCE_API_KEY e BINANCE_API_SECRET nos secrets do Streamlit.")
+
+    params = params or {}
+    params = {
+        **params,
+        "recvWindow": 5000,
+        "timestamp": int(time.time() * 1000),
+    }
+    params = binance_assinar(params, api_secret)
+    resposta = requests.request(
+        method,
+        f"{binance_base_url()}{path}",
+        params=params,
+        headers={"X-MBX-APIKEY": api_key},
+        timeout=15,
+    )
+    resposta.raise_for_status()
+    if not resposta.text:
+        return {"status": "OK"}
+    return resposta.json()
+
+
+def binance_conta():
+    return binance_request("GET", "/api/v3/account", {"omitZeroBalances": "true"})
+
+
+def binance_ordem_market(symbol, side, quote_order_qty=None, quantity=None, testar=True):
+    params = {
+        "symbol": symbol.upper().strip(),
+        "side": side,
+        "type": "MARKET",
+    }
+    if side == "BUY":
+        params["quoteOrderQty"] = f"{float(quote_order_qty):.8f}"
+    else:
+        params["quantity"] = f"{float(quantity):.8f}"
+
+    endpoint = "/api/v3/order/test" if testar else "/api/v3/order"
+    return binance_request("POST", endpoint, params)
+
+
+def binance_ordens_abertas(symbol=""):
+    params = {"symbol": symbol.upper().strip()} if symbol else {}
+    return binance_request("GET", "/api/v3/openOrders", params)
 
 
 @st.cache_data(ttl=300)
@@ -399,8 +476,8 @@ if "trade_log" not in st.session_state:
     st.session_state.trade_log = []
 
 
-aba_mercado, aba_ia, aba_robo, aba_carteira = st.tabs(
-    ["📊 Mercado", "🧠 IA Quant", "🤖 Robô Paper", "💼 Holdings"]
+aba_mercado, aba_ia, aba_robo, aba_binance, aba_carteira = st.tabs(
+    ["📊 Mercado", "🧠 IA Quant", "🤖 Robô Paper", "🔐 Binance Real", "💼 Holdings"]
 )
 
 with aba_mercado:
@@ -610,6 +687,114 @@ with aba_robo:
 
     except Exception as erro:
         st.error(f"Não foi possível carregar o robô paper agora: {erro}")
+
+with aba_binance:
+    st.warning(
+        "Área de ordens reais. Por padrão, use validação/testnet. "
+        "Ordem real só deve ser ativada depois de testar bem o robô paper."
+    )
+
+    api_key, api_secret = binance_credenciais()
+    trading_habilitado = str(buscar_segredo("BINANCE_TRADING_ENABLED", "false")).lower() == "true"
+
+    st.caption(
+        "Configure no Streamlit Cloud em Settings > Secrets: "
+        "BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_USE_TESTNET e, só quando quiser liberar, "
+        "BINANCE_TRADING_ENABLED=true."
+    )
+
+    status1, status2, status3 = st.columns(3)
+    status1.metric("Credenciais", "OK" if api_key and api_secret else "Faltando")
+    status2.metric("Endpoint", binance_base_url().replace("https://", ""))
+    status3.metric("Trading real", "Liberado" if trading_habilitado else "Bloqueado")
+
+    col_conta, col_ordens = st.columns(2)
+    with col_conta:
+        if st.button("🔎 Ver saldo Binance"):
+            try:
+                conta = binance_conta()
+                saldos = [
+                    {
+                        "Ativo": item["asset"],
+                        "Livre": float(item["free"]),
+                        "Travado": float(item["locked"]),
+                    }
+                    for item in conta.get("balances", [])
+                    if float(item["free"]) > 0 or float(item["locked"]) > 0
+                ]
+                if saldos:
+                    st.dataframe(pd.DataFrame(saldos), use_container_width=True, hide_index=True)
+                else:
+                    st.info("Conta conectada, mas sem saldos positivos retornados.")
+            except Exception as erro:
+                st.error(f"Falha ao consultar conta Binance: {erro}")
+
+    with col_ordens:
+        simbolo_ordens = st.text_input("Símbolo para ordens abertas", "BTCUSDT")
+        if st.button("📋 Ver ordens abertas"):
+            try:
+                ordens = binance_ordens_abertas(simbolo_ordens)
+                if ordens:
+                    st.dataframe(pd.DataFrame(ordens), use_container_width=True)
+                else:
+                    st.info("Nenhuma ordem aberta para esse símbolo.")
+            except Exception as erro:
+                st.error(f"Falha ao consultar ordens: {erro}")
+
+    st.subheader("Compra e venda manual")
+    ordem1, ordem2, ordem3, ordem4 = st.columns(4)
+    with ordem1:
+        simbolo_ordem = st.text_input("Par", "BTCUSDT")
+    with ordem2:
+        lado_ordem = st.selectbox("Lado", ["BUY", "SELL"], format_func=lambda item: "Comprar" if item == "BUY" else "Vender")
+    with ordem3:
+        valor_compra = st.number_input("Compra em USDT", min_value=5.0, value=10.0, step=5.0)
+    with ordem4:
+        qtd_venda = st.number_input("Qtd. para venda", min_value=0.0, value=0.0, step=0.0001, format="%.8f")
+
+    validar_apenas = st.toggle("Validar apenas, sem executar ordem real", value=True)
+    confirmacao = st.text_input("Para ordem real, digite: EU ASSUMO O RISCO")
+
+    pode_executar_real = trading_habilitado and confirmacao == "EU ASSUMO O RISCO" and not validar_apenas
+    texto_botao = "✅ Validar ordem" if validar_apenas else "🚨 Enviar ordem REAL"
+
+    if st.button(texto_botao, type="primary"):
+        try:
+            if not validar_apenas and not pode_executar_real:
+                st.error(
+                    "Ordem real bloqueada. Ative BINANCE_TRADING_ENABLED=true nos secrets "
+                    "e digite a frase de confirmação exatamente."
+                )
+            elif lado_ordem == "BUY":
+                resposta = binance_ordem_market(
+                    simbolo_ordem,
+                    "BUY",
+                    quote_order_qty=valor_compra,
+                    testar=validar_apenas,
+                )
+                st.success("Validação concluída." if validar_apenas else "Compra real enviada.")
+                st.json(resposta)
+            else:
+                if qtd_venda <= 0:
+                    st.warning("Informe a quantidade para venda.")
+                else:
+                    resposta = binance_ordem_market(
+                        simbolo_ordem,
+                        "SELL",
+                        quantity=qtd_venda,
+                        testar=validar_apenas,
+                    )
+                    st.success("Validação concluída." if validar_apenas else "Venda real enviada.")
+                    st.json(resposta)
+        except Exception as erro:
+            st.error(f"Falha na ordem Binance: {erro}")
+
+    st.subheader("Robô real")
+    st.info(
+        "A automação real contínua precisa rodar em servidor/cron, não dentro do clique do Streamlit. "
+        "Esta aba deixa a conexão e as ordens manuais preparadas; o próximo passo é criar um worker "
+        "com limites diários, logs persistentes e trava de perda."
+    )
 
 with aba_carteira:
     try:
