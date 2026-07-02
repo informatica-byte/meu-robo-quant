@@ -39,9 +39,12 @@ with aba_mercado:
         progresso = st.progress(0, text="A analisar o mercado...")
         
         try:
-            # CORREÇÃO: Usando API pública do Brasil para o Dólar (imune a bloqueios americanos)
-            url_dolar = 'https://economia.awesomeapi.com.br/json/last/USD-BRL'
-            dolar_hoje = float(requests.get(url_dolar).json()['USDBRL']['bid'])
+            # CORREÇÃO BLINDADA: Tenta uma API super estável. Se falhar, usa o Plano B.
+            try:
+                url_dolar = 'https://api.exchangerate-api.com/v4/latest/USD'
+                dolar_hoje = float(requests.get(url_dolar, timeout=5).json()['rates']['BRL'])
+            except:
+                dolar_hoje = 5.50 # Plano B: O app NÃO quebra se a API do dólar falhar!
             
             url_ticker = 'https://api.binance.com/api/v3/ticker/24hr'
             dados = requests.get(url_ticker).json()
@@ -111,7 +114,7 @@ with aba_mercado:
                 st.warning("Nenhuma moeda encontrada.")
                 
         except Exception as e:
-            st.error(f"Erro: {e}")
+            st.error(f"Erro central: {e}")
 
 with aba_carteira:
     st.info("Aba de património em desenvolvimento.")
