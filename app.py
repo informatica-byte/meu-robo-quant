@@ -10,31 +10,21 @@ st.title("📱 Meu App Crypto (Com Gráficos V6)")
 
 # --- Função para desenhar o Gráfico ---
 def desenhar_grafico(simbolo):
-    # Puxa as últimas 72 horas (3 dias) de velas de 1h
     url = f'https://api.binance.com/api/v3/klines?symbol={simbolo}&interval=1h&limit=72'
     velas = requests.get(url).json()
     
-    # Organiza os dados para o gráfico
     df_velas = pd.DataFrame(velas, columns=['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'qav', 'nt', 'tbv', 'tqv', 'ig'])
-    df_velas['t'] = pd.to_datetime(df_velas['t'], unit='ms') # Converte o tempo
+    df_velas['t'] = pd.to_datetime(df_velas['t'], unit='ms')
     df_velas[['o', 'h', 'l', 'c']] = df_velas[['o', 'h', 'l', 'c']].astype(float)
     
-    # Cria o Candlestick
     fig = go.Figure(data=[go.Candlestick(
-        x=df_velas['t'],
-        open=df_velas['o'],
-        high=df_velas['h'],
-        low=df_velas['l'],
-        close=df_velas['c'],
-        name="Preço"
+        x=df_velas['t'], open=df_velas['o'], high=df_velas['h'],
+        low=df_velas['l'], close=df_velas['c'], name="Preço"
     )])
     
-    # Deixa o fundo escuro e bonito
     fig.update_layout(
         title=f'📊 Análise Gráfica: {simbolo.replace("USDT", "")} (Últimos 3 dias)',
-        template='plotly_dark',
-        yaxis_title='Preço (USDT)',
-        xaxis_title='Tempo',
+        template='plotly_dark', yaxis_title='Preço (USDT)', xaxis_title='Tempo',
         margin=dict(l=0, r=0, t=40, b=0)
     )
     st.plotly_chart(fig, use_container_width=True)
@@ -49,8 +39,9 @@ with aba_mercado:
         progresso = st.progress(0, text="A analisar o mercado...")
         
         try:
-            url_dolar = 'https://api.binance.com/api/v3/ticker/price?symbol=USDTBRL'
-            dolar_hoje = float(requests.get(url_dolar).json()['price'])
+            # CORREÇÃO: Usando API pública do Brasil para o Dólar (imune a bloqueios americanos)
+            url_dolar = 'https://economia.awesomeapi.com.br/json/last/USD-BRL'
+            dolar_hoje = float(requests.get(url_dolar).json()['USDBRL']['bid'])
             
             url_ticker = 'https://api.binance.com/api/v3/ticker/24hr'
             dados = requests.get(url_ticker).json()
@@ -58,11 +49,9 @@ with aba_mercado:
             moedas_usdt = [m for m in dados if m['symbol'].endswith('USDT') 
                            and m['symbol'] not in ['USDCUSDT', 'FDUSDUSDT', 'TUSDUSDT', 'USDTUSDT']]
             
-            # Se pesquisou uma moeda exata, desenha o gráfico dela!
             if busca:
                 moedas_alvo = [m for m in moedas_usdt if busca in m['symbol']]
                 if len(moedas_alvo) > 0:
-                    # Pega a primeira moeda que encontrou e desenha
                     simbolo_exato = moedas_alvo[0]['symbol']
                     desenhar_grafico(simbolo_exato)
             else:
@@ -71,7 +60,7 @@ with aba_mercado:
             
             resultados = []
 
-            for idx, moeda in enumerate(moedas_alvo[:10]): # Limite de 10 na tabela para não demorar
+            for idx, moeda in enumerate(moedas_alvo[:10]):
                 simbolo = moeda['symbol']
                 nome = simbolo.replace('USDT', '')
                 preco_dolar = float(moeda['lastPrice'])
