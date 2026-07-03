@@ -1,0 +1,55 @@
+name: Robo Paper 24h
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/15 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: robo-paper-24h
+  cancel-in-progress: false
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Baixar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: pip install requests
+
+      - name: Rodar robo paper
+        env:
+          BOT_MODE: paper
+          BOT_RUN_ONCE: "true"
+          BOT_PAPER_INITIAL_CASH: "10000"
+          BOT_SYMBOLS: BTCUSDT,ETHUSDT,SOLUSDT
+          BOT_USDT_PER_TRADE: "25"
+          BOT_MAX_POSITIONS: "3"
+          BOT_STOP_LOSS_PCT: "5"
+          BOT_TAKE_PROFIT_PCT: "10"
+          BOT_DAILY_LOSS_LIMIT_PCT: "3"
+          BUY_SCORE: "74"
+          SELL_SCORE: "36"
+          BOT_STATE_FILE: bot_state.json
+          BOT_TRADES_FILE: bot_trades.csv
+        run: python crypto_bot_worker.py
+
+      - name: Salvar estado do paper trading
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bot_state.json bot_trades.csv
+          git diff --staged --quiet || git commit -m "Atualiza estado do robo paper"
+          git push
