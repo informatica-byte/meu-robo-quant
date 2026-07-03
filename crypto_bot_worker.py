@@ -423,6 +423,11 @@ def main():
     log(f"Robô 24h iniciado em modo {modo.upper()}.")
     log("Modo recomendado para provar estratégia: BOT_MODE=paper.")
 
+    if env_bool("BOT_RUN_ONCE", False):
+        ciclo()
+        log("Ciclo único concluído.")
+        return
+
     while True:
         try:
             ciclo()
